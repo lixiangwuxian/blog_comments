@@ -1,0 +1,35 @@
+name: Auto Delete Unauthorized Issues
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  auto-delete:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete issue if not owner
+        uses: actions/github-script@v6
+        with:
+          # 注意：这里必须使用我们刚才设置的 ADMIN_TOKEN，而不是默认的 GITHUB_TOKEN
+          github-token: ${{ secrets.ADMIN_TOKEN }}
+          script: |
+            const actor = context.actor;
+            const owner = context.repo.owner;
+            
+            // 判断：如果创建者不是仓库拥有者
+            if (actor !== owner) {
+              console.log(`Detected unauthorized issue by ${actor}. Deleting...`);
+              
+              try {
+                // 调用删除接口
+                await github.rest.issues.delete({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                });
+                console.log("Issue deleted successfully.");
+              } catch (error) {
+                console.log("Failed to delete issue. Please check PAT permissions.");
+                console.log(error);
+              }
+            }

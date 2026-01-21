@@ -1,0 +1,106 @@
+name: AI Comment Moderator
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  ai-check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # 需要写权限来隐藏评论
+    steps:
+      - name: Check if comment is from owner
+        id: check_owner
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // 如果评论者是仓库主人，直接跳过
+            if (context.actor === context.repo.owner) {
+              core.setOutput('skip', 'true');
+              console.log('Owner comment, skipping check.');
+            } else {
+              core.setOutput('skip', 'false');
+            }
+
+      - name: Analyze Comment with AI
+        if: steps.check_owner.outputs.skip == 'false'
+        id: ai_analysis
+        uses: actions/github-script@v6
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        with:
+          script: |
+            // 1. 调用 OpenAI 接口
+            // 感谢New API的公益中转站
+            const response = await fetch('https://runanytime.hxi.me/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+              },
+              body: JSON.stringify({
+                model: "claude-haiku-4-5-20251001",
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are a GitHub comment moderator bot. Check if the comment contains spam, pornographic content, gambling ads, or malicious links. Reply ONLY with a JSON object: {\"is_spam\": true/false, \"reason\": \"SPAM\" or \"ABUSE\" or \"OFF_TOPIC\"}. If it is spam, choose the classifier reason that best fits GitHub's minimize categories."
+                  },
+                  {
+                    role: "user",
+                    content: process.env.COMMENT_BODY
+                  }
+                ],
+                temperature: 0
+              })
+            });
+
+            const data = await response.json();
+            
+            if(!data.choices || data.choices.length === 0) {
+                console.log("API Error", data);
+                return; 
+            }
+
+            const content = data.choices[0].message.content;
+            console.log("AI Verdict:", content);
+            
+            // 解析 JSON
+            let verdict;
+            try {
+                // 有时候 AI 可能会返回 Markdown 代码块，做一个简单的清洗
+                const cleanJson = content.replace(/```json/g, '').replace(/```/g, '').trim();
+                verdict = JSON.parse(cleanJson);
+            } catch (e) {
+                console.log("Failed to parse JSON", e);
+                return;
+            }
+
+            // 2. 如果判定为垃圾信息，执行隐藏操作
+            if (verdict.is_spam) {
+              console.log("🚨 Spam detected! Hiding comment...");
+              
+              // 使用 GraphQL API 隐藏评论 (Minimize)
+              // reason 可选值: SPAM, ABUSE, OFF_TOPIC, OUTDATED, RESOLVED, DUPLICATE, COMPLICATED
+              const mutation = `
+                mutation($input: MinimizeCommentInput!) {
+                  minimizeComment(input: $input) {
+                    minimizedComment {
+                      isMinimized
+                    }
+                  }
+                }
+              `;
+              
+              const variables = {
+                input: {
+                  subjectId: context.payload.comment.node_id, // 注意：这里需要 node_id
+                  classifier: verdict.reason || "SPAM"
+                }
+              };
+
+              await github.graphql(mutation, variables);
+              console.log("✅ Comment hidden successfully.");
+            } else {
+              console.log("✅ Comment looks safe.");
+            }
